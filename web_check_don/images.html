@@ -1,0 +1,101 @@
+<!doctype html>
+<html lang="vi">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Render PNG (img_hd_kiot ➜ images)</title>
+
+<!-- Gọi cấu hình nội bộ -->
+<script src="./js/internal_key.js"></script>
+
+<style>
+  html,body{margin:0;padding:0;background:#fff;font-family:system-ui,Segoe UI,Roboto,Arial}
+  .wrap{max-width:900px;margin:40px auto;padding:0 16px}
+  h1{font-size:20px;margin-bottom:12px}
+  .row{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin:8px 0}
+  input[type=text]{flex:1;min-width:300px;padding:8px;border:1px solid #d1d5db;border-radius:6px}
+  button{padding:8px 14px;background:#111827;color:#fff;border:none;border-radius:6px;cursor:pointer}
+  button[disabled]{opacity:.6;cursor:not-allowed}
+  .muted{color:#6b7280}
+  img{max-width:100%;border:1px solid #e5e7eb;border-radius:12px;margin-top:10px}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>🧩 Render hóa đơn HTML → PNG (Supabase)</h1>
+
+  <div class="row">
+    <label>File HTML nguồn:</label>
+    <input id="src" type="text" />
+  </div>
+  <div class="row">
+    <label>File PNG đích:</label>
+    <input id="out" type="text" />
+  </div>
+  <div class="row">
+    <button id="btn">Render & Upload</button>
+    <span id="status" class="muted">Sẵn sàng</span>
+  </div>
+
+  <div id="result" style="display:none">
+    <p><strong>Link PNG:</strong> <a id="link" href="#" target="_blank">mở ảnh</a></p>
+    <img id="preview" src="" alt="Preview PNG"/>
+  </div>
+</div>
+
+<script>
+(async () => {
+  const SUPABASE_URL  = getConfig("url");
+  const SUPABASE_ROLE = getConfig("role");
+  const RENDER_API    = getConfig("render_api") || `${location.origin}/api_render/render.png`;
+
+  const srcInput = document.getElementById("src");
+  const outInput = document.getElementById("out");
+  const btn = document.getElementById("btn");
+  const status = document.getElementById("status");
+  const result = document.getElementById("result");
+  const link = document.getElementById("link");
+  const preview = document.getElementById("preview");
+
+  // ✅ Mặc định: đúng thư mục bạn đã up
+  srcInput.value = `${SUPABASE_URL}/storage/v1/object/public/img_hd_kiot/img_hd.html`;
+  outInput.value = `images/img_hd.png`;
+
+  btn.addEventListener("click", async () => {
+    const src = srcInput.value.trim();
+    const out = outInput.value.trim();
+    if (!src) return alert("Chưa nhập link HTML nguồn!");
+
+    btn.disabled = true;
+    status.textContent = "Đang render...";
+
+    try {
+      const url = new URL(RENDER_API);
+      url.searchParams.set("src", src);
+      url.searchParams.set("out", out);
+      url.searchParams.set("w", "794");
+      url.searchParams.set("s", "2");
+      url.searchParams.set("ts", Date.now());
+
+      const resp = await fetch(url);
+      if (!resp.ok) throw new Error(`Lỗi render: ${resp.status}`);
+      const data = await resp.json();
+
+      const imageUrl = data.image_url;
+      link.href = imageUrl;
+      link.textContent = imageUrl;
+      preview.src = imageUrl;
+      result.style.display = "block";
+      status.textContent = "✅ Thành công!";
+    } catch (err) {
+      console.error(err);
+      status.textContent = "❌ " + err.message;
+      alert(err.message);
+    } finally {
+      btn.disabled = false;
+    }
+  });
+})();
+</script>
+</body>
+</html>
