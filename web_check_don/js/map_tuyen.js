@@ -7,6 +7,7 @@
 // Supabase: ghi vị trí nếu có SDK/endpoint
 // Đánh số thứ tự theo độ gần vị trí của tôi (cập nhật realtime)
 // Nhãn tên KH nhỏ (chữ thường) chỉ hiện khi ở gần/zoom lớn
+// (ĐÃ BỎ): Tô màu phường từ GeoJSON
 // =====================================================================
 
 (function softGate(){ try { if (typeof window.checkAccess === 'function') window.checkAccess(); } catch(_) {} })();
@@ -68,13 +69,13 @@ function rebuildGroup(){ if(GROUP) map.removeLayer(GROUP); GROUP=createGroup(); 
 rebuildGroup();
 
 const ROUTES       = L.layerGroup().addTo(map);
-const WARD_LABELS  = L.layerGroup().addTo(map);
-const NEAR_LABELS  = L.layerGroup().addTo(map); // tên KH chữ thường khi ở gần
+const WARD_LABELS  = L.layerGroup().addTo(map);  // nhãn phường suy từ điểm (vẫn giữ)
+const NEAR_LABELS  = L.layerGroup().addTo(map);  // tên KH chữ thường khi ở gần
 let RADIUS_LAYER=null;
 
 const $status = document.getElementById('status');
 
-/* ========= Toolbar (căn giữa, chỉnh chấm khách) ========= */
+/* ========= Toolbar ========= */
 (function(){
   if (document.getElementById('tbFix')) return;
   const st=document.createElement('style'); st.id='tbFix';
@@ -134,27 +135,43 @@ function buildViewLinks(lat,lng,name=''){ const gView=linkViewOnGoogle(lat,lng,n
 
 /* ========= Marker (divIcon có số lồng trong) ========= */
 function markerRadius(){ return mapCfg.markerSize==='small'?22:mapCfg.markerSize==='large'?28:24; }
-function makeNumIcon(num){
+function makeNumIcon(num, color='#0ea5e9'){
   const sz = markerRadius();
   return L.divIcon({
     className:'',
-    html:`<div class="poi" style="width:${sz}px;height:${sz}px;font-size:${Math.max(11,Math.round(sz*0.5))}px">${num||''}</div>`,
+    html:`<div class="poi" style="background:${color};width:${sz}px;height:${sz}px;font-size:${Math.max(11,Math.round(sz*0.5))}px">${num||''}</div>`,
     iconSize:[sz,sz],
     iconAnchor:[sz/2,sz/2],
     popupAnchor:[0,-sz/2]
   });
 }
-let MARKERS_DATA=[]; // {marker,lat,lng,name,addr,phone,rank}
+function colorForStatus(st=''){
+  const s = st.toString().toLowerCase();
+  if (!mapCfg.colorByStatus) return '#0ea5e9';
+  if (s.includes('mới') || s.includes('new')) return '#22c55e';
+  if (s.includes('đang') || s.includes('ship')) return '#f59e0b';
+  if (s.includes('hủy') || s.includes('cancel')) return '#ef4444';
+  if (s.includes('trả') || s.includes('return')) return '#8b5cf6';
+  return '#0ea5e9';
+}
+let MARKERS_DATA=[]; // {marker,lat,lng,name,addr,phone,status,rank}
 
 /* ========= CSV & render ========= */
 let RAW=[]; let KEY={};
+let csvCtrl = null;
 
 async function loadCSV(){
+  if (csvCtrl) { csvCtrl.abort(); }
+  csvCtrl = new AbortController();
+  const sig = csvCtrl.signal;
+
   $status.textContent='Đang tải dữ liệu…';
   GROUP.clearLayers(); ROUTES.clearLayers(); WARD_LABELS.clearLayers(); NEAR_LABELS.clearLayers(); MARKERS_DATA=[];
-  const resp=await fetch(CSV_URL+(CSV_URL.includes('?')?'&':'?')+'t='+Date.now(),{cache:'no-store'}); if(!resp.ok) throw new Error('Không tải được CSV ('+resp.status+')');
-  const text=await resp.text(); if(!text||!/[,;\n]/.test(text)) throw new Error('CSV rỗng/không hợp lệ');
-  RAW=parseCSV(text); if(!Array.isArray(RAW)||RAW.length===0) throw new Error('Không có dữ liệu');
+  const resp=await fetch(CSV_URL+(CSV_URL.includes('?')?'&':'?')+'t='+Date.now(),{cache:'no-store', signal:sig}); if(!resp.ok) throw new Error('Không tải được CSV ('+resp.status+')');
+  const text=await resp.text(); if(sig.aborted) return;
+  if(!text||!/[,;\n]/.test(text)) throw new Error('CSV rỗng/không hợp lệ');
+  const parsed = parseCSV(text);
+  RAW = parsed; if(!Array.isArray(RAW)||RAW.length===0) throw new Error('Không có dữ liệu');
 
   const s=RAW[0];
   KEY.lat=guessKey(s,['lat','latitude','vido','vi_do','vĩ độ','y','vi do'])||'lat';
@@ -169,9 +186,10 @@ async function loadCSV(){
   renderFiltered();
 }
 function parseCSV(text){
-  if(window.Papa){ const parsed=Papa.parse(text,{header:true,skipEmptyLines:true}); return parsed.data; }
-  const rows=text.trim().split(/\r?\n/); const header=rows.shift().split(',').map(s=>s.trim());
-  return rows.map(line=>{ const cols=line.split(','); const o={}; for(let i=0;i<header.length;i++) o[header[i]]=cols[i]??''; return o; });
+  if(!window.Papa) throw new Error('Thiếu PapaParse – vui lòng import CDN trước file này.');
+  const parsed=Papa.parse(text,{header:true,skipEmptyLines:true,dynamicTyping:false});
+  if (parsed.errors?.length) console.warn('Papa errors:', parsed.errors.slice(0,3));
+  return parsed.data;
 }
 function guessKey(obj,alts){ const keys=Object.keys(obj); for(const name of alts){ const k=keys.find(k=>k.toLowerCase().trim()===name); if(k) return k; } for(const name of alts){ const k=keys.find(k=>k.toLowerCase().includes(name)); if(k) return k; } return null; }
 
@@ -253,13 +271,14 @@ function renderFiltered(){
              && (Q.free.length? Q.free.every(k=>[code,name,phone,addr,nv,st].some(v=>text(v).includes(k))) : true);
     if(!ok) continue;
 
-    const m=L.marker([fixed.lat,fixed.lng],{icon:makeNumIcon('')})
+    const color = colorForStatus(st);
+    const m=L.marker([fixed.lat,fixed.lng],{icon:makeNumIcon('', color)})
       .bindPopup(`<b>${esc(name||'Không tên')}</b><br>${esc(addr)}${phone?`<br>${esc(phone)}`:''}${buildViewLinks(fixed.lat,fixed.lng,name)}`);
     if(mapCfg.tooltip){ m.bindTooltip(`${name||''} • ${addr||''}${phone?` • ${phone}`:''}`,{sticky:true,opacity:.9}); }
     if(mapCfg.labelKH && code){ m.bindTooltip(String(code),{permanent:true,direction:'top',className:'kh-label',offset:[0,-(markerRadius()/2)-2]}); }
     m.addTo(GROUP);
 
-    MARKERS_DATA.push({ marker:m, lat:fixed.lat, lng:fixed.lng, name, addr, phone, rank:0 });
+    MARKERS_DATA.push({ marker:m, lat:fixed.lat, lng:fixed.lng, name, addr, phone, status:st, rank:0 });
     bounds.extend([fixed.lat,fixed.lng]); count++;
 
     const ward=extractWard(addr);
@@ -278,11 +297,14 @@ function renderFiltered(){
 
   updateNearestNumbers();
   updateProximityLabels();
+
+  // vẽ tuyến & tổng khoảng cách
+  drawRoutes(routes);
 }
 
 /* ========= Nhãn gần (tên KH chữ thường) ========= */
-const NEAR_M = 250;            // m: hiện tên khi ở rất gần
-const NEAR_M_ZOOM_BONUS = 600; // m: nếu zoom ≥ 16
+const NEAR_M = 250;
+const NEAR_M_ZOOM_BONUS = 600;
 function updateProximityLabels(){
   NEAR_LABELS.clearLayers();
   const useZoom = map.getZoom() >= 16;
@@ -312,7 +334,27 @@ function updateNearestNumbers(){
   for (let i=0;i<arr.length;i++){
     const it = MARKERS_DATA[arr[i].idx];
     it.rank = i+1;
-    it.marker.setIcon(makeNumIcon(i+1));
+    const c = colorForStatus(it.status);
+    it.marker.setIcon(makeNumIcon(i+1, c));
+  }
+}
+
+/* ========= Vẽ tuyến & tổng quãng đường ========= */
+function drawRoutes(routes){
+  ROUTES.clearLayers();
+  let total = 0;
+  const colors = {};
+  const getColor = key => (colors[key] ||= `hsl(${(key.length*53)%360} 85% 45%)`);
+
+  for (const [key, pts] of routes.entries()){
+    if (pts.length < 2) continue;
+    const latlngs = pts.map(p => [p.lat, p.lng]);
+    for (let i=1; i<pts.length; i++) total += distM(pts[i-1], pts[i]);
+    L.polyline(latlngs, { color:getColor(key), weight:3, opacity:0.8 }).addTo(ROUTES);
+  }
+  if (mapCfg.showDistance){
+    const km = (total/1000).toFixed(1);
+    $status.textContent += ` • Tổng quãng đường: ${km} km`;
   }
 }
 
@@ -386,7 +428,17 @@ function renderConfigPanel(){
   function val(id){ return document.getElementById(id).value; }
   function chk(id){ return document.getElementById(id).checked; }
 
-  const preview=()=>{ mapCfg=getCfg(); setBase(mapCfg.mapTheme); rebuildGroup(); renderFiltered(); };
+  const preview=()=>{ 
+    mapCfg=getCfg(); 
+    setBase(mapCfg.mapTheme); 
+    rebuildGroup(); 
+    renderFiltered();
+    if (mapCfg.showRadius){
+      if (RADIUS_LAYER){ map.removeLayer(RADIUS_LAYER); RADIUS_LAYER=null; }
+      const c = map.getCenter();
+      RADIUS_LAYER = L.circle(c,{radius:mapCfg.radiusKm*1000,color:'#9333ea',weight:2,fillOpacity:.08}).addTo(map);
+    }
+  };
   ['cfgMarkerSize','cfgTheme','cfg_radiusKm'].forEach(id=>document.getElementById(id).addEventListener('change',preview));
   ['cfg_autoFit','cfg_cluster','cfg_labelKH','cfg_tooltip','cfg_routeByNV','cfg_showDistance','cfg_colorByStatus','cfg_showRadius']
     .forEach(id=>document.getElementById(id).addEventListener('change',()=>{ document.getElementById('rowRadius').style.display=document.getElementById('cfg_showRadius').checked?'':''; preview(); }));
@@ -436,9 +488,10 @@ async function startMyLocation(ma_nv){
 function stopMyLocation(){ if(MY_WATCH){ navigator.geolocation.clearWatch(MY_WATCH); MY_WATCH=null; } if(MY_MARKER){ map.removeLayer(MY_MARKER); MY_MARKER=null; } if(MY_RADIUS){ map.removeLayer(MY_RADIUS); MY_RADIUS=null; } }
 
 /* ========= UI & init ========= */
+function debounce(fn, ms=200){ let t; return (...a)=>{ clearTimeout(t); t=setTimeout(()=>fn(...a),ms); }; }
 function bindUI(){
   document.getElementById('reload')?.addEventListener('click', async ()=>{ try{ await loadCSV(); }catch(e){ $status.textContent='Lỗi: '+(e.message||e); } });
-  const q=document.getElementById('q'); q?.addEventListener('input',()=>renderFiltered());
+  const q=document.getElementById('q'); q?.addEventListener('input',debounce(()=>{ try{ sessionStorage.setItem('map_query', q.value||''); }catch{} renderFiltered(); },180));
   document.getElementById('vnOnly')?.addEventListener('change',()=>renderFiltered());
   map.on('moveend',()=>{ 
     if(mapCfg.showRadius){
@@ -460,4 +513,10 @@ document.addEventListener('DOMContentLoaded', async ()=>{
     if(granted||wantAuto) startMyLocation(nv.ma_nv); 
   } 
 });
-document.addEventListener('DOMContentLoaded', ()=>{ bindUI(); renderConfigPanel(); applyFilterFromURL(); document.getElementById('reload')?.click(); });
+document.addEventListener('DOMContentLoaded', ()=>{ 
+  bindUI(); 
+  renderConfigPanel(); 
+  applyFilterFromURL(); 
+  document.getElementById('reload')?.click(); 
+  // (ĐÃ BỎ) drawWardAreas();
+});

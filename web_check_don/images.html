@@ -1,0 +1,169 @@
+<!doctype html>
+<html lang="vi">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Render HD → PNG (STRICT v2, dùng getConfig)</title>
+
+<!-- LẤY URL + ANON từ internal_key.js bạn đã cung cấp -->
+<script src="./js/internal_key.js"></script>
+
+<!-- html2canvas để chụp DOM -->
+<script src="https://cdn.jsdelivr.net/npm/html2canvas@1.4.1/dist/html2canvas.min.js"></script>
+
+<style>
+  :root{ --bg:#0b1220; --card:#0f1830; --txt:#e6edff; --muted:#9aa7c7; --line:#233053; }
+  html,body{background:var(--bg);color:var(--txt);font-family:system-ui,Segoe UI,Roboto,Arial;margin:0}
+  .wrap{max-width:920px;margin:24px auto;padding:18px 20px;background:var(--card);border:1px solid var(--line);border-radius:14px}
+  h1{margin:0 0 12px}
+  .row{display:flex;gap:10px;flex-wrap:wrap;margin:10px 0}
+  button{padding:10px 12px;border-radius:10px;border:1px solid var(--line);background:#1b2a4a;color:#e6edff;cursor:pointer}
+  button[disabled]{opacity:.6;cursor:not-allowed}
+  #stageWrap{border:1px dashed #35507f;border-radius:12px;padding:10px;background:#0b1220;overflow:auto}
+  #stage{margin:auto;background:#fff;color:#111;box-shadow:0 0 0 1px #ddd}
+  #result img{max-width:100%;display:block;border:1px solid #2a3e6b;border-radius:8px}
+  .urlbox{padding:8px 10px;border:1px dashed #35507f;border-radius:10px;background:#0b1220;word-break:break-all}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Render HD → PNG (STRICT v2)</h1>
+  <div class="row">
+    <button id="btnRun">Render & Upload</button>
+    <button id="btnDownload" disabled>Tải PNG</button>
+  </div>
+
+  <h3>Xem trước HTML</h3>
+  <div id="stageWrap"><div id="stage"></div></div>
+
+  <h3>Kết quả</h3>
+  <pre id="out" class="urlbox">Chưa chạy.</pre>
+  <div id="result"></div>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+const elStage = $('stage'), elOut = $('out'), elRes = $('result');
+const btnRun = $('btnRun'), btnDL = $('btnDownload');
+
+function log(m){ elOut.textContent = (typeof m==='string') ? m : JSON.stringify(m,null,2); }
+
+/* ==== Đọc cấu hình theo internal_key.js của bạn ==== */
+function getCfg(){
+  if (typeof window.getConfig !== 'function') throw new Error('Không tìm thấy getConfig()');
+  const SUPABASE_URL  = window.getConfig('url');
+  const ANON_KEY      = window.getConfig('anon');
+  const BUCKET        = 'images';        // bạn đang dùng bucket này
+  const UPLOAD_PREFIX = 'renders';       // thư mục con lưu PNG
+  if (!SUPABASE_URL) throw new Error('Thiếu SUPABASE_URL (getConfig("url"))');
+  if (!ANON_KEY)     throw new Error('Thiếu SUPABASE_ANON_KEY (getConfig("anon"))');
+  return { SUPABASE_URL, ANON_KEY, BUCKET, UPLOAD_PREFIX };
+}
+
+/* ==== Nhận tham số do n8n truyền vào ==== */
+function getParams(){
+  const q = new URLSearchParams(location.search);
+  const code = 'HD004433';
+  const folderRaw = (q.get('folder')||'').trim();
+  const folder = folderRaw && !folderRaw.endsWith('/') ? (folderRaw + '/') : folderRaw;
+  const hook = (q.get('hook')||'').trim();      // tùy chọn: callback về n8n
+  if (!code) throw new Error('Thiếu ?code=HD00xxxx do n8n truyền vào');
+  // Cho phép HD… và KH… (nếu bạn đang dùng KH làm mã hoá đơn)
+  if (!/(^HD0*\d+$)|(^KH0*\d+$)/i.test(code)) throw new Error('code không hợp lệ (HD/KH)');
+  return { code, folder, hook };
+}
+
+/* ==== Xây URL đọc file HTML đúng mã ==== */
+function buildHtmlUrl(cfg, code, folder){
+  return `${cfg.SUPABASE_URL}/storage/v1/object/public/${encodeURIComponent(cfg.BUCKET)}/${folder}${encodeURIComponent(code)}.html`;
+}
+
+async function fetchHTML(url){
+  const r = await fetch(url, { mode:'cors' });
+  if (!r.ok) throw new Error('Không tải được HTML: ' + r.status);
+  return await r.text();
+}
+function extractBody(html){
+  const doc = new DOMParser().parseFromString(html,'text/html');
+  const styles = [...doc.head.querySelectorAll('style')].map(s=>s.outerHTML).join('\n');
+  const bodyHTML = (doc.body && doc.body.innerHTML) ? doc.body.innerHTML : html;
+  return styles + '\n' + bodyHTML;
+}
+function detectCodeFromText(text){
+  const plain = text.replace(/\u00a0/g,' ').replace(/\s+/g,' ').trim();
+  let m = plain.match(/\bHD0*\d{3,}\b/i); if (m) return m[0].toUpperCase();
+  m = plain.match(/\bKH0*\d{3,}\b/i);      if (m) return m[0].toUpperCase();
+  m = plain.match(/(?:ma[_\s-]*vach|mã\s*(?:vạch|hóa\s*đơn))[:\s-]*([A-Z0-9\-]{3,})/i);
+  if (m) return (m[1]||'').toUpperCase();
+  return null;
+}
+async function waitImgs(node){
+  const imgs = node.querySelectorAll('img');
+  await Promise.all([...imgs].map(img => img.complete ? 0 : new Promise(r => (img.onload = img.onerror = r))));
+}
+async function renderToBlob(node, width=794){
+  node.style.width = width + 'px';
+  node.style.maxWidth = width + 'px';
+  await waitImgs(node);
+  const canvas = await html2canvas(node, { backgroundColor:'#fff', scale:2, useCORS:true, logging:false });
+  return new Promise(res => canvas.toBlob(b => res(b), 'image/png'));
+}
+async function uploadPng(cfg, blob, filename){
+  const path = `${cfg.UPLOAD_PREFIX}/${filename}`;
+  const putUrl = `${cfg.SUPABASE_URL}/storage/v1/object/${encodeURIComponent(cfg.BUCKET)}/${encodeURIComponent(path)}`;
+  const r = await fetch(putUrl, {
+    method:'POST',
+    headers:{ 'Authorization': `Bearer ${cfg.ANON_KEY}`, 'Content-Type':'image/png', 'x-upsert':'true' },
+    body: blob
+  });
+  if (!r.ok){ const t = await r.text().catch(()=> ''); throw new Error('Upload fail: '+r.status+' '+t); }
+  return `${cfg.SUPABASE_URL}/storage/v1/object/public/${encodeURIComponent(cfg.BUCKET)}/${encodeURIComponent(path)}`;
+}
+
+/* ==== Run ==== */
+btnRun.onclick = async () => {
+  btnRun.disabled = true; btnDL.disabled = true; elRes.innerHTML = ''; log('Đang chạy…');
+  try{
+    const cfg = getCfg();
+    const { code, folder, hook } = getParams();
+    const htmlUrl = buildHtmlUrl(cfg, code, folder);
+
+    log('Tải HTML: ' + htmlUrl);
+    const raw = await fetchHTML(htmlUrl);
+    elStage.innerHTML = extractBody(raw);
+
+    // Xác thực mã bên trong
+    const inside = (elStage.innerText || elStage.textContent || '');
+    const detected = detectCodeFromText(inside);
+    if (!detected) throw new Error('Không tìm thấy mã trong nội dung HTML.');
+    if (detected !== code) throw new Error(`MÃ KHÔNG KHỚP! Query=${code}, Trong HTML=${detected}`);
+
+    // Render → PNG
+    const blob = await renderToBlob(elStage, 794);
+
+    // Cho tải về
+    const objUrl = URL.createObjectURL(blob);
+    elRes.innerHTML = `<img src="${objUrl}" alt="preview" />`;
+    btnDL.href = objUrl; btnDL.download = `${code}.png`; btnDL.disabled = false;
+
+    // Upload PNG
+    log('Upload PNG…');
+    const pngUrl = await uploadPng(cfg, blob, `${code}_${Date.now()}.png`);
+    log({ ok:true, code, htmlUrl, pngUrl });
+
+    // (tuỳ chọn) gọi về n8n
+    if (hook){
+      fetch(hook, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ code, htmlUrl, pngUrl }) }).catch(()=>{});
+    }
+  }catch(err){
+    log(String(err.message || err));
+  }finally{
+    btnRun.disabled = false;
+  }
+};
+
+// Tự chạy nếu đã có ?code=
+(function auto(){ if (new URLSearchParams(location.search).get('code')) btnRun.click(); })();
+</script>
+</body>
+</html>
