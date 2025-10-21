@@ -1,0 +1,87 @@
+<!doctype html>
+<html lang="vi">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Render PNG trực tiếp (Vercel)</title>
+<script src="./js/internal_key.js"></script>
+<style>
+  html,body{margin:0;padding:0;background:#fff;font-family:system-ui,Segoe UI,Roboto,Arial}
+  .wrap{max-width:900px;margin:40px auto;padding:0 16px}
+  .row{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin:8px 0}
+  input[type=text]{flex:1;min-width:300px;padding:8px;border:1px solid #d1d5db;border-radius:6px}
+  button{padding:8px 14px;background:#111827;color:#fff;border:none;border-radius:6px;cursor:pointer}
+  .muted{color:#6b7280}
+  img{max-width:100%;border:1px solid #e5e7eb;border-radius:12px;margin-top:10px}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>🧩 Render HTML → PNG (trực tiếp từ Vercel, không upload)</h1>
+
+  <div class="row">
+    <label>File HTML nguồn:</label>
+    <input id="src" type="text" />
+  </div>
+  <div class="row">
+    <button id="btn">Render</button>
+    <span id="status" class="muted">Sẵn sàng</span>
+  </div>
+
+  <div id="result" style="display:none">
+    <p><strong>Link PNG:</strong> <a id="link" href="#" target="_blank" rel="noopener">mở ảnh</a></p>
+    <img id="preview" alt="Preview PNG"/>
+  </div>
+</div>
+
+<script>
+(() => {
+  const SUPABASE_URL = getConfig("url");
+  // API render trực tiếp trên Vercel (không trả JSON):
+  const RENDER_API   = `${location.origin}/api/render.png`;
+
+  const srcInput = document.getElementById("src");
+  const btn      = document.getElementById("btn");
+  const status   = document.getElementById("status");
+  const result   = document.getElementById("result");
+  const linkEl   = document.getElementById("link");
+  const preview  = document.getElementById("preview");
+
+  // Gợi ý mặc định: đúng bucket/file của bạn
+  srcInput.value = `${SUPABASE_URL}/storage/v1/object/public/img_hd_kiot/img_hd.html`;
+
+  btn.addEventListener("click", async () => {
+    try{
+      const src = srcInput.value.trim();
+      if(!src) return alert("Chưa nhập link HTML nguồn!");
+      status.textContent = "Đang render...";
+
+      // Tạo URL ảnh PNG trực tiếp từ API render
+      const url = new URL(RENDER_API);
+      url.searchParams.set("src", src);
+      url.searchParams.set("w", "794");
+      url.searchParams.set("s", "2");
+      url.searchParams.set("ts", Date.now()); // tránh cache
+
+      // Không cần fetch JSON — đặt thẳng src cho <img> và href cho <a>
+      const pngUrl = url.toString();
+
+      // (Tuỳ chọn) ping HEAD để báo lỗi sớm nếu endpoint hỏng
+      const head = await fetch(pngUrl, { method: "HEAD" });
+      if(!head.ok) throw new Error(`Render lỗi: ${head.status}`);
+
+      linkEl.href = pngUrl;
+      linkEl.textContent = pngUrl;
+      preview.src = pngUrl;
+      result.style.display = "";
+      status.textContent = "✅ Xong!";
+    }catch(e){
+      console.error(e);
+      status.textContent = "❌ " + (e.message || e);
+      alert(e.message || e);
+    }
+  });
+})();
+</script>
+</body>
+</html>
