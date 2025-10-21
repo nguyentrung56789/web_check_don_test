@@ -3,84 +3,78 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width,initial-scale=1" />
-<title>Render PNG trực tiếp (Vercel)</title>
+<title>Render PNG Hidden</title>
+
 <script src="./js/internal_key.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/html2canvas@1.4.1/dist/html2canvas.min.js"></script>
+
 <style>
-  html,body{margin:0;padding:0;background:#fff;font-family:system-ui,Segoe UI,Roboto,Arial}
-  .wrap{max-width:900px;margin:40px auto;padding:0 16px}
-  .row{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin:8px 0}
-  input[type=text]{flex:1;min-width:300px;padding:8px;border:1px solid #d1d5db;border-radius:6px}
-  button{padding:8px 14px;background:#111827;color:#fff;border:none;border-radius:6px;cursor:pointer}
-  .muted{color:#6b7280}
-  img{max-width:100%;border:1px solid #e5e7eb;border-radius:12px;margin-top:10px}
+  html,body{margin:0;padding:0;background:#fff;color:#888;font:14px system-ui}
+  #stage{display:none}
 </style>
 </head>
 <body>
-<div class="wrap">
-  <h1>🧩 Render HTML → PNG (trực tiếp từ Vercel, không upload)</h1>
-
-  <div class="row">
-    <label>File HTML nguồn:</label>
-    <input id="src" type="text" />
-  </div>
-  <div class="row">
-    <button id="btn">Render</button>
-    <span id="status" class="muted">Sẵn sàng</span>
-  </div>
-
-  <div id="result" style="display:none">
-    <p><strong>Link PNG:</strong> <a id="link" href="#" target="_blank" rel="noopener">mở ảnh</a></p>
-    <img id="preview" alt="Preview PNG"/>
-  </div>
-</div>
-
 <script>
-(() => {
-  const SUPABASE_URL = getConfig("url");
-  // API render trực tiếp trên Vercel (không trả JSON):
-  const RENDER_API   = `${location.origin}/api/render.png`;
-
-  const srcInput = document.getElementById("src");
-  const btn      = document.getElementById("btn");
-  const status   = document.getElementById("status");
-  const result   = document.getElementById("result");
-  const linkEl   = document.getElementById("link");
-  const preview  = document.getElementById("preview");
-
-  // Gợi ý mặc định: đúng bucket/file của bạn
-  srcInput.value = `${SUPABASE_URL}/storage/v1/object/public/img_hd_kiot/img_hd.html`;
-
-  btn.addEventListener("click", async () => {
-    try{
-      const src = srcInput.value.trim();
-      if(!src) return alert("Chưa nhập link HTML nguồn!");
-      status.textContent = "Đang render...";
-
-      // Tạo URL ảnh PNG trực tiếp từ API render
-      const url = new URL(RENDER_API);
-      url.searchParams.set("src", src);
-      url.searchParams.set("w", "794");
-      url.searchParams.set("s", "2");
-      url.searchParams.set("ts", Date.now()); // tránh cache
-
-      // Không cần fetch JSON — đặt thẳng src cho <img> và href cho <a>
-      const pngUrl = url.toString();
-
-      // (Tuỳ chọn) ping HEAD để báo lỗi sớm nếu endpoint hỏng
-      const head = await fetch(pngUrl, { method: "HEAD" });
-      if(!head.ok) throw new Error(`Render lỗi: ${head.status}`);
-
-      linkEl.href = pngUrl;
-      linkEl.textContent = pngUrl;
-      preview.src = pngUrl;
-      result.style.display = "";
-      status.textContent = "✅ Xong!";
-    }catch(e){
-      console.error(e);
-      status.textContent = "❌ " + (e.message || e);
-      alert(e.message || e);
+(async()=>{
+  try {
+    // ====== 1. Kiểm tra khóa nội bộ ======
+    const expectedKey = window.getInternalKey?.();
+    const headerKey = new URLSearchParams(location.search).get('key');
+    if(!headerKey || headerKey !== expectedKey){
+      document.body.innerHTML = "<h3>403 Forbidden</h3>";
+      return;
     }
-  });
+
+    // ====== 2. Lấy thông tin Supabase từ internal_key.js ======
+    const SUPABASE_URL = getConfig('url');
+    const SERVICE_ROLE = getConfig('role');   // dùng role key nội bộ
+    const HTML_BUCKET  = 'img_hd_kiot';
+    const HTML_KEY     = 'img_hd.html';
+    const PNG_BUCKET   = 'images';
+    const PNG_KEY      = 'img_hd.png';
+
+    // ====== 3. Tải file HTML nguồn ======
+    const htmlUrl = `${SUPABASE_URL}/storage/v1/object/public/${HTML_BUCKET}/${HTML_KEY}`;
+    const resp = await fetch(htmlUrl, { mode:'cors', cache:'no-store' });
+    if(!resp.ok) throw new Error('Không tải được HTML');
+    const html = await resp.text();
+
+    // ====== 4. Tạo DOM tạm (ẩn) ======
+    const stage = document.createElement('div');
+    stage.id = 'stage';
+    stage.innerHTML = html;
+    document.body.appendChild(stage);
+
+    // Đợi ảnh load xong
+    await Promise.all([...stage.querySelectorAll('img')].map(i => i.complete ? 0 : new Promise(r => (i.onload=i.onerror=r))));
+
+    // ====== 5. Render sang PNG ======
+    const canvas = await html2canvas(stage, { backgroundColor:'#fff', scale:2, useCORS:true });
+    const blob = await new Promise(r => canvas.toBlob(r, 'image/png'));
+
+    // ====== 6. Upload lên Supabase (ghi đè) ======
+    const uploadUrl = `${SUPABASE_URL}/storage/v1/object/${PNG_BUCKET}/${PNG_KEY}`;
+    const up = await fetch(uploadUrl, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${SERVICE_ROLE}`,
+        'Content-Type': 'image/png',
+        'x-upsert': 'true'
+      },
+      body: blob
+    });
+    if(!up.ok){
+      const t = await up.text().catch(()=> '');
+      throw new Error('Upload lỗi: '+t);
+    }
+
+    console.log('✅ Uploaded:', `${SUPABASE_URL}/storage/v1/object/public/${PNG_BUCKET}/${PNG_KEY}`);
+    document.body.innerHTML = '<p style="color:#4caf50">✔ Hoàn tất upload PNG</p>';
+
+  } catch(e) {
+    console.error(e);
+    document.body.innerHTML = `<p style="color:red">Lỗi: ${e.message || e}</p>`;
+  }
 })();
 </script>
 </body>
